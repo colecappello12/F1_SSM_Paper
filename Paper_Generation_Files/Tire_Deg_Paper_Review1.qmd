@@ -328,27 +328,21 @@ Lastly, the prior on the $\alpha_{reset}$ parameters are decided by the long run
 The error standard deviation priors for the compound specific degradation model remain the same as before. However, the degradation rate and state resets change since we have to estimate parameters for each tire compound. We have the following extra priors in place of the $\nu$ and $\alpha_{reset}$ of before:
 
 \begin{align}
-\nu[1] &\sim N^+(.01,.1^2) \\
-\nu[2] &\sim N^+(.03,.1^2) \\
-\nu[3] &\sim N^+(.05,.1^2) \\
 \alpha_{reset}[1] &\sim N(69.5,.1^2) \\
 \alpha_{reset}[2] &\sim N(69,.1^2) \\
 \alpha_{reset}[3] &\sim N(68.5,.1^2)
 \end{align}
 
-Here $\nu[1]$ is the degradation rate for the hard tire, $\nu[2]$ is the degradation rate for the medium tire, and $\nu[3]$ is the degradation rate for the soft tire. A similar pattern follows for the reset parameters. Here, the priors for the degradation rates and resets reflect our prior beliefs that harder tires should degrade more slowly, but also start out slower. In contrast, the soft tires will start out faster but degrade more quickly.
+Here $\alpha_{reset}[1]$ is the reset parameter for the hard tire, $\alpha_{reset}[2]$ is the reset parameter for the medium tire, and $\alpha_{reset}[3]$ is the reset parameter for the soft tire. Here, the priors for the resets reflect our prior beliefs that harder tires should start out slower and softer tires will start out faster.
 
 As mentioned in the previous section, there is data from the second free practice session of that race weekend which suggested that the race pace of the medium tires would be 69-69.5 seconds per lap. We use the lower end of this spectrum to account for greater incentive to do faster lap times during the actual race. Then, we make the hard tire reset value a half second slower--and the soft tire a half second faster relative to the medium tires--to reflect our beliefs that the soft tires will start out faster and the hard tires will start out slower.
 
 
 ### Extension 2 - Time-Varying Degradation
 
-Here, the error standard deviation priors are the same as the base model, and the reset parameters are the same as for the compound specific degradation model. The main difference is that the degradation priors are now on $\beta$, and we include a prior for the degradation state reset $\nu_{reset}$.
+Here, the error standard deviation priors are the same as the base model, and the reset parameters are the same as for the compound specific degradation model. The main difference is that we include a prior for the degradation state reset $\nu_{reset}$.
 
 \begin{align}
-\beta[1] &\sim N^+(.005,.1^2) \\
-\beta[2] &\sim N^+(.01,.1^2) \\
-\beta[3] &\sim N^+(.02,.1^2) \\
 \nu_{reset} &\sim N(0,.1^2)
 \end{align}
 

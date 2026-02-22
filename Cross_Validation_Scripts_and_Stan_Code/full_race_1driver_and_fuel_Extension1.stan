@@ -43,8 +43,8 @@ model {
   sdp ~ normal(.1,.1);
 
   z_reset[1] ~ normal(z_reset0[1],.1);
-  z_reset[2] ~ normal(z_reset0[2],.5);
-  z_reset[3] ~ normal(z_reset0[3],.5);
+  z_reset[2] ~ normal(z_reset0[2],.1);
+  z_reset[3] ~ normal(z_reset0[3],.1);
 
   z[1] ~ normal(z_reset[Compound[1]], .1);
   for(t in 2:TT){

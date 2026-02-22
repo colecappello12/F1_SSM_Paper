@@ -1,12 +1,12 @@
 # A State-Space Approach to Modeling Tire Degradation in Formula 1 Racing
 
-This repository contains code and data used to create the paper "A State-Space Approach to Modeling Tire Degradation in Formula 1 Racing. There are four folders containing different aspects of the paper creation process.
+This repository contains code and data used to create the paper "A State-Space Approach to Modeling Tire Degradation in Formula 1 Racing". There are four folders containing different aspects of the paper creation process.
 
 # Paper_Generation_Files
 
 The file Tire_Deg_Paper_Review1.qmd generates the final paper, though we manually perform some final cleaning of the output tex file to ensure proper formatting. 
 
-The folder itself shoud contain all the necessary results and files to generate the paper from Tire_Deg_Paper_Review1.qmd. 
+The folder itself should contain all the necessary results and files to generate the paper from Tire_Deg_Paper_Review1.qmd. 
 
 ## Data_Generation_Scripts
 
