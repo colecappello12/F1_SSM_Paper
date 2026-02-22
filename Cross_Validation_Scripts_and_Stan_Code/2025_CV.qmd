@@ -1,0 +1,136 @@
+---
+title: "2025_CV"
+format: html
+---
+
+```{r, message=FALSE}
+
+# Setup
+library(tidyverse)
+library(Matrix)
+library(rstan)
+library(sgt)
+library(scoringRules)
+library(scoringutils)
+
+source("CV_Functions.R")
+
+options(mc.cores = parallel::detectCores())
+
+allLaps <- read_csv("Hamilton_2025_All_Races.csv")
+
+```
+
+
+# Dataset Cleaning
+
+We want to drop Australia and British Grand Prixs because they were wet races, and we want to drop Miami and Belgian Grand Prixs because they are missing data. Drop the Dutch Grand Prix too because Hamilton did not finish. 
+
+We also drop laps with a safety car, and the final 4 laps of the Singapore Grand Prix.
+
+```{r}
+
+allLaps <- allLaps %>%
+  mutate(Stint = as.factor(Stint),
+         Compound = as.factor(Compound),
+         LapTime = LapTimeSeconds) %>%
+  filter(!Race %in% c("Australian Grand Prix",
+                       "British Grand Prix",
+                       "Miami Grand Prix",
+                      "Dutch Grand Prix",
+                      "Belgian Grand Prix"),
+         !(LapNumber > 58 & Race == "Singapore Grand Prix")) %>%
+  filter(!str_detect(TrackStatus, "4|5|6|7")) # Drop Laps with safety car, virtual safety car, red flag, or safety car ending
+
+```
+
+
+# Cross-Session CV Results
+
+The following chunk can be run to get all of the cross-session results files. It outputs one csv per race with stint-level CV metrics. The last code chunk aggregates these files into a table with race-level metrics which is displayed in the final paper.
+
+It is unlikely that anyone trying to reproduce this analysis will be able to run the full pipeline in a single go. Due to the size of the posterior samples of each stan fit, R sometimes has trouble reallocating memory and gets stuck after finishing the analysis for a race. This means keeping an eye on the output and restarting R and continuing from the last Race analyzed if the issue occurs.
+
+The code currently comments out the majority of races so that it will only run for a single race. In the event that an interested reader would like to rerun the full pipeline, one can uncomment the necessary lines of the tibble.
+
+Sampling challenges were observed in some of the races. For example, running 10000 iterations for the Italian Grand Prix was insufficient and resulted in large R-hat errors. The code is currently set to run 10000 iterations for each race to save time, but this number may need to be increased for certain races to eliminate R-hat and effective sample size warnings.
+
+
+
+```{r}
+
+race_params <- tibble(
+  Race = c("Chinese Grand Prix"#, "Japanese Grand Prix","Bahrain Grand Prix","Saudi Arabian Grand Prix","Emilia Romagna Grand Prix","Monaco Grand Prix", "Spanish Grand Prix","Canadian Grand Prix","Austrian Grand Prix", "Hungarian Grand Prix", "Italian Grand Prix", "Azerbaijan Grand Prix", "Singapore Grand Prix", "United States Grand Prix", "Mexico City Grand Prix", "São Paulo Grand Prix", "Las Vegas Grand Prix", "Qatar Grand Prix", "Abu Dhabi Grand Prix" 
+    ),
+  z_reset = c(96.0#, 92.0,96.5,93.5,79.0,75.0, 79.0, 75.5, 69, 80.5, 82.0, 104,94, 98.5, 81, 74.5, 95.5, 85.5, 88.5
+    )
+)
+
+for(i in 1:nrow(race_params)){
+  
+  race <- race_params$Race[i]
+  z_reset <- race_params$z_reset[i]
+  data_list <- load_race_data(race)
+  data_list$z_reset0 <- z_reset
+  
+  main_CV("full_race_1driver_and_fuel_base_t.stan", data_list, racename = race)
+  
+}
+
+
+```
+
+
+```{r}
+
+# Code to get results summary from individual race outputs.
+
+race_names <- gsub(" ", "_",unique(allLaps$Race))
+
+filename <- paste0(race_names[1], "_results1.csv")
+
+df <- read_csv(file = filename)
+
+df_results <- tibble(
+    Race = race_names[1],
+    
+    skewt_RMSPE_total = sum(df$skewt_RMSPE),
+    arima_RMSPE_total = sum(df$arima_RMSPE),
+    
+    skewt_RMSPE_mean = mean(df$skewt_RMSPE),
+    arima_RMSPE_mean = mean(df$arima_RMSPE),
+    
+    skewt_CRPS  = mean(df$skewt_CRPS),
+    arima_CRPS  = mean(df$arima_CRPS),
+    
+    n_stints = nrow(df)
+  )
+
+for(i in 2:length(race_names)){
+  
+  filename <- paste0(race_names[i], "_results1.csv")
+
+  df <- read_csv(file = filename)
+  
+  df_temp <- tibble(
+    Race = race_names[i],
+    
+    skewt_RMSPE_total = sum(df$skewt_RMSPE),
+    arima_RMSPE_total = sum(df$arima_RMSPE),
+    
+    skewt_RMSPE_mean = mean(df$skewt_RMSPE),
+    arima_RMSPE_mean = mean(df$arima_RMSPE),
+    
+    skewt_CRPS  = mean(df$skewt_CRPS),
+    arima_CRPS  = mean(df$arima_CRPS),
+    
+    n_stints = nrow(df)
+  )
+  
+  df_results <- rbind(df_results, df_temp)
+  
+}
+
+write_csv(df_results[,-c(2,3)], "All_CV_results1.csv")
+
+```

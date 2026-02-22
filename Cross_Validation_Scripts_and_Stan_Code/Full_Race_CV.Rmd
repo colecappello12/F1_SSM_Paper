@@ -1,0 +1,746 @@
+---
+title: "Cross Validation on a Real Race"
+author: "Cole Cappello"
+date: "09-29-25"
+output: pdf_document
+---
+
+```{r, message=FALSE}
+
+# Setup
+library(tidyverse)
+library(Matrix)
+library(rstan)
+library(sgt)
+
+options(mc.cores = parallel::detectCores())
+
+```
+
+# The Austrian Grand Prix 2025
+
+I'm going to load lap time data from the Austrian Grand Prix for various drivers.  We'll do cross validation on Lewis Hamilton's race as he does seem to have a race that conforms relatively well to our model. Here is a visual of Hamilton's lap times:
+
+```{r, message=FALSE}
+
+austria_laps <- read_csv("Austria_laps.csv")
+
+austria_laps <- austria_laps %>%
+    mutate(Stint = as.factor(Stint),
+           Compound = as.factor(Compound))
+
+filter(austria_laps, Driver == "HAM", is.na(PitOutTime) & is.na(PitInTime),LapTime < 100) %>%
+    ggplot(mapping = aes(x = LapNumber, y = LapTime, colour = Stint)) +
+    geom_point() +
+    geom_smooth() +
+    labs(title = "Tire Degration -- Lewis Hamilton (Ferrari)",
+         x = "Lap Number",
+         y = "Lap Time (Seconds)")
+
+```
+
+
+# Cross Validation Code
+
+In this section I will include the code used for cross validation. Skip to the next section if interested in results.
+
+## Stan CV code
+
+```{r, message=FALSE, results='hide', warning=FALSE}
+
+stint_CV <- function(model_string, data_list) {
+
+    # Store the full data/time series
+    y <- data_list[["y"]]
+    # Store the full compound vector
+    compound <- data_list[["Compound"]]
+    # Store the full pit vector
+    pit <- data_list[["Pit"]]
+    # Store the Fuel vector
+    fuel <- data_list[["fuel_mass"]]
+
+   
+    # Get the index of laps that end a stint
+    end_stint <- which(data_list[["Pit"]] == 1)
+    # Add the last lap because that also marks the end of a stint
+    end_stint <- c(end_stint,length(y))
+
+    # Number of Stints
+    num_stints <- length(end_stint)
+    
+    # Will get RMSPE for each stint so need an empty vector
+    RMSPE_vec <- rep(NA, num_stints)
+
+    # Will get plots for each stint
+    plots <- vector("list", length = num_stints)
+    
+    posteriors <- vector("list", length = num_stints)
+    
+    for(j in 1:num_stints) {
+
+        # Do CV on last quarter of each stint        
+        # Number of folds
+        if(j == 1) {
+            K <- round(end_stint[j]/4)
+        } else {
+            K <- round((end_stint[j] - end_stint[j-1])/4)
+        }    
+
+        stan.models <- vector("list", length = K)
+        posteriors[[j]] <- vector("list", length = K)
+
+        # Vector to Store one-step ahead predictions and CI bounds
+        ypred_hat <- rep(NA, K)
+        ypred_l <- rep(NA, K)
+        ypred_u <- rep(NA, K)
+
+        for(i in 1:K) {
+
+            # Update data vector to allow for next step prediction
+            data_list[["TT"]] <- length(y[1:(i+end_stint[j]-K-1)])
+            data_list[["y"]] <- y[1:(i+end_stint[j]-K-1)]
+            data_list[["Compound"]] <- compound[1:(i+end_stint[j]-K-1)]
+            c_map <- sort(unique(compound[1:(i+end_stint[j]-K-1)]))
+            data_list[["compound_map"]] <- array(c_map, dim = length(c_map))
+            data_list[["C_used"]] <- length(c_map)
+            data_list[["Pit"]] <- pit[1:(i+end_stint[j]-K-1)]
+            data_list[["fuel_mass"]] <- fuel[1:(i+end_stint[j]-K-1)]
+            
+            # Fit model on subset of data then get one step ahead prediction
+            stan.models[[i]] <- stan(file = model_string,
+                                     data = data_list,
+                                     chains = 3, iter = 30000,
+                                     control = list(adapt_delta = .99, max_treedepth = 12))
+            posteriors[[j]][[i]] <- extract(stan.models[[i]])
+            ypred_hat[i]  <- mean(posteriors[[j]][[i]]$y_pred)
+            ypred_l[i] <- quantile(posteriors[[j]][[i]]$y_pred, probs = .05)
+            ypred_u[i] <- quantile(posteriors[[j]][[i]]$y_pred, probs = .95)
+            
+        }    
+
+        # Plots
+        df <- tibble(laps = 1:end_stint[j],
+                     y = y[1:end_stint[j]])
+
+        pred_df <- tibble(time = (end_stint[j] - K + 1):end_stint[j],
+                          pred = ypred_hat,
+                          pred_l = ypred_l,
+                          pred_u = ypred_u)
+
+        plots[[j]] <- ggplot() +
+            geom_point(data = df,
+                       aes(x = laps, y = y, color = "Observations")) +
+            geom_point(data = pred_df,
+                       aes(x = time, y = pred, color = "Predictions")) +
+            geom_ribbon(data = pred_df, aes(x = time, ymin = pred_l, ymax = pred_u), fill = "black",color = "gray", alpha = .1) +
+            scale_color_manual(values = c("Observations" = "red",
+                                          "Predictions" = "blue")) +
+            labs(title = paste("Scatter Plot of Lap vs Lap Times with Predictions for Stint", j),
+                 x = "Lap",
+                 y = "Laptime in Seconds",
+                 color = "Legend")
+        
+        # Calculate Summary Statistic
+        MSPE <- mean((y[(end_stint[j]-K+1):end_stint[j]] - ypred_hat)^2)
+        RMSPE_vec[j] <- sqrt(MSPE)
+
+    }
+    return(list(RMSPE_vec,plots,posteriors))
+}
+
+```
+
+
+## Arima Baseline CV code
+
+```{r, message=FALSE, results='hide'}
+
+arima_cv <- function(y, pit) {
+
+    # Get the index of laps that end a stint
+    end_stint <- which(pit == 1)
+    # Add the last lap because that also marks the end of a stint
+    end_stint <- c(end_stint,length(y))
+
+    # Number of Stints
+    num_stints <- length(end_stint)
+    
+    # Will get RMSPE for each stint so need an empty vector
+    RMSPE_vec <- rep(NA, num_stints)
+    
+    # Will get CRPS for each stint too
+    CRPS_vec <- rep(NA, num_stints)
+
+    # Will get plots for each stint
+    plots <- vector("list", length = num_stints)
+
+    for(i in 1:num_stints) {
+
+        # Number of folds
+        if(i == 1) {
+            K <- round(end_stint[i]/4)
+        } else {
+            K <- round((end_stint[i] - end_stint[i-1])/4)
+        }    
+
+        arma.models <- vector("list", length = K)
+
+        # Vector to Store one-step ahead predictions
+        ypred_hat <- rep(NA, K)
+        ypred_se <- rep(NA, K)
+
+        for(j in 1:K) {
+
+            arma.models[[j]] <- arima(y[1:(j+end_stint[i]-K-1)], order = c(2,1,2))
+            pr <- predict(arma.models[[j]],n.ahead = 1)
+            ypred_hat[j] <- as.numeric(pr$pred)
+            ypred_se[j] <- as.numeric(pr$se)
+            
+        }
+                # Plots
+        df <- tibble(laps = 1:end_stint[i],
+                     y = y[1:end_stint[i]])
+
+        pred_df <- tibble(time = (end_stint[i] - K + 1):end_stint[i],
+                          pred = ypred_hat)
+
+        plots[[i]] <- ggplot() +
+            geom_point(data = df,
+                       aes(x = laps, y = y, color = "Observations")) +
+            geom_point(data = pred_df,
+                       aes(x = time, y = pred, color = "Predictions")) +
+            scale_color_manual(values = c("Observations" = "red",
+                                          "Predictions" = "blue")) +
+            labs(title = paste("Scatter Plot of Lap vs Lap Times with Predictions for Stint", i),
+                 x = "Lap",
+                 y = "Laptime in Seconds",
+                 color = "Legend")
+        
+        # Calculate Summary Statistic
+        MSPE <- mean((y[(end_stint[i]-K+1):end_stint[i]] - ypred_hat)^2)
+        RMSPE_vec[i] <- sqrt(MSPE)
+        CRPS_vec[i] <- mean(crps(y[(end_stint[i]-K+1):end_stint[i]], family = "normal", mean = ypred_hat, sd = ypred_se))
+        
+        
+    }
+
+    return(list(RMSPE_vec,plots,CRPS_vec))
+    
+}
+
+```
+
+# Analysis
+
+## Get the data ready
+
+```{r}
+
+leclerc_df <- austria_laps %>%
+    filter(Driver == "LEC", is.na(PitOutTime) & is.na(PitInTime), LapTime < 100) %>%
+    mutate(Compound_Code = as.integer(factor(Compound,levels = c("HARD","MEDIUM","SOFT"))))
+
+leclerc_laps <- leclerc_df$LapTime
+
+leclerc_compound <- leclerc_df$Compound_Code
+
+leclerc_pit <- rep(0,length(leclerc_compound))
+
+for(i in 2:length(leclerc_df$Stint)) {
+    if(leclerc_df$Stint[i] != leclerc_df$Stint[i-1]) {
+        leclerc_pit[i-1] <- 1
+    }    
+}                  
+
+fuel.kg <- seq(110,1,length.out = length(leclerc_laps))
+
+leclerc_map <- sort(unique(leclerc_compound))
+leclerc_used <- length(leclerc_map)
+
+```
+
+## Cross Validation Results
+
+```{r, warning=FALSE}
+
+# Arima cv
+arima_results <- arima_cv(leclerc_laps, leclerc_pit)
+
+# Stan SSM CV
+leclerc_data <- list(TT = length(leclerc_laps), y = leclerc_laps, C = 3, Compound = leclerc_compound, C_used = leclerc_used, compound_map = leclerc_map, Pit = leclerc_pit, z_reset0 = c(80.5,79,79), v_reset0 = 0, sdo0 = .3, fuel_mass = fuel.kg)
+
+stan_results <- stint_CV("full_race_1driver_and_fuel_real.stan", leclerc_data)
+
+```
+
+
+```{r}
+
+# Stint 1
+arima_results[[1]][[1]]
+stan_results[[1]][[1]]
+
+# Stint 2
+arima_results[[1]][[2]]
+stan_results[[1]][[2]]
+
+#Stint 3
+arima_results[[1]][[3]]
+stan_results[[1]][[3]]
+
+```
+
+
+
+# Appendix
+
+Plots of lap time vs lap with observations and predictions from both the arima model and our full SSM.
+
+## Arima Predictions
+
+```{r}
+
+arima_results[[2]][[1]]
+
+arima_results[[2]][[2]]
+
+arima_results[[2]][[3]]
+
+```
+
+## SSM Predictions
+
+```{r}
+
+stan_results[[2]][[1]]
+
+stan_results[[2]][[2]]
+
+stan_results[[2]][[3]]
+
+```
+
+# Hamilton Code
+
+## Tests
+
+```{r}
+
+hamilton_df <- austria_laps %>%
+    filter(Driver == "HAM", is.na(PitOutTime) & is.na(PitInTime), LapTime < 100) %>%
+    mutate(Compound_Code = as.integer(factor(Compound,levels = c("HARD","MEDIUM","SOFT"))))
+
+hamilton_laps <- hamilton_df$LapTime
+
+hamilton_compound <- hamilton_df$Compound_Code
+
+hamilton_pit <- rep(0,length(hamilton_compound))
+
+for(i in 2:length(hamilton_df$Stint)) {
+    if(hamilton_df$Stint[i] != hamilton_df$Stint[i-1]) {
+        hamilton_pit[i-1] <- 1
+    }    
+}                  
+
+fuel.kg <- seq(110,1,length.out = length(hamilton_laps))
+
+hamilton_map <- sort(unique(hamilton_compound))
+hamilton_used <- length(hamilton_map)
+
+# Data for stan code
+hamilton_data <- list(TT = length(hamilton_laps), y = hamilton_laps, C = 3, Compound = hamilton_compound, C_used = hamilton_used, compound_map = hamilton_map, Pit = hamilton_pit, z_reset0 = 69, v_reset0 = 0, sdo0 = .3, fuel_mass = fuel.kg)
+
+test_model <- stan(file = "full_race_1driver_and_fuel_base.stan",
+                        data = hamilton_data,
+                        chains = 3, iter = 30000,
+                        control = list(adapt_delta = .99, max_treedepth = 12))
+
+posterior_test <- extract(test_model)
+
+alphas <- colMeans(posterior_test[["z"]])
+
+plotting <- tibble(Lap = 1:63,
+                   alphas = alphas,
+                   observations = hamilton_laps)
+
+ggplot(plotting, mapping = aes(x = Lap)) + 
+  geom_point(mapping = aes(y =observations, col = "Observations"))+
+  geom_point(mapping = aes(y = alphas, col = "Latent States"))
+
+
+
+##########################################################################################
+
+# Data for stan code
+hamilton_data <- list(TT = length(hamilton_laps), y = hamilton_laps, C = 3, Compound = hamilton_compound, C_used = hamilton_used, compound_map = hamilton_map, Pit = hamilton_pit, z_reset0 = c(69.5,69,69.5), v_reset0 = 0, sdo0 = .3, fuel_mass = fuel.kg)
+
+test_model <- stan(file = "full_race_1driver_and_fuel_Extension1.stan",
+                        data = hamilton_data,
+                        chains = 3, iter = 30000,
+                        control = list(adapt_delta = .99, max_treedepth = 12))
+
+posterior_test <- extract(test_model)
+
+alphas <- colMeans(posterior_test[["z"]])
+
+plotting <- tibble(Lap = 1:63,
+                   alphas = alphas,
+                   observations = hamilton_laps)
+
+ggplot(plotting, mapping = aes(x = Lap)) + 
+  geom_point(mapping = aes(y =observations, col = "Observations"))+
+  geom_point(mapping = aes(y = alphas, col = "Latent States"))
+
+
+##########################################################################################
+
+hamilton_data <- list(TT = length(hamilton_laps), y = hamilton_laps, C = 3, Compound = hamilton_compound, C_used = hamilton_used, compound_map = hamilton_map, Pit = hamilton_pit, z_reset0 = c(69,68.5,68), v_reset0 = 0, sdo0 = .3, fuel_mass = fuel.kg)
+
+test_model <- stan(file = "full_race_1driver_and_fuel_Extension2.stan",
+                        data = hamilton_data,
+                        chains = 3, iter = 30000,
+                        control = list(adapt_delta = .99, max_treedepth = 12))
+
+posterior_test <- extract(test_model)
+
+alphas <- colMeans(posterior_test[["z"]])
+
+plotting <- tibble(Lap = 1:63,
+                   alphas = alphas,
+                   observations = hamilton_laps)
+
+ggplot(plotting, mapping = aes(x = Lap)) + 
+  geom_point(mapping = aes(y =observations, col = "Observations"))+
+  geom_point(mapping = aes(y = alphas, col = "Latent States"))
+
+```
+## Get Data Ready
+
+```{r}
+
+hamilton_df <- austria_laps %>%
+    filter(Driver == "HAM", is.na(PitOutTime) & is.na(PitInTime), LapTime < 100) %>%
+    mutate(Compound_Code = as.integer(factor(Compound,levels = c("HARD","MEDIUM","SOFT"))))
+
+hamilton_laps <- hamilton_df$LapTime
+
+hamilton_compound <- hamilton_df$Compound_Code
+
+hamilton_pit <- rep(0,length(hamilton_compound))
+
+for(i in 2:length(hamilton_df$Stint)) {
+    if(hamilton_df$Stint[i] != hamilton_df$Stint[i-1]) {
+        hamilton_pit[i-1] <- 1
+    }    
+}                  
+
+fuel.kg <- seq(110,1,length.out = length(hamilton_laps))
+
+hamilton_map <- sort(unique(hamilton_compound))
+hamilton_used <- length(hamilton_map)
+
+# Data for stan code
+hamilton_data_base <- list(TT = length(hamilton_laps), y = hamilton_laps, C = 3, Compound = hamilton_compound, C_used = hamilton_used, compound_map = hamilton_map, Pit = hamilton_pit, z_reset0 = 69, v_reset0 = 0, sdo0 = .3, fuel_mass = fuel.kg)
+
+hamilton_data_Ext <- list(TT = length(hamilton_laps), y = hamilton_laps, C = 3, Compound = hamilton_compound, C_used = hamilton_used, compound_map = hamilton_map, Pit = hamilton_pit, z_reset0 = c(69.5,69,68.5), v_reset0 = 0, sdo0 = .3, fuel_mass = fuel.kg)
+
+```
+
+
+
+```{r}
+
+stan_results_base <- stint_CV("full_race_1driver_and_fuel_base.stan", hamilton_data_base)
+
+stan_results_Ext1 <-stint_CV("full_race_1driver_and_fuel_Extension1.stan", hamilton_data_Ext)
+
+stan_results_Ext2 <- stint_CV("full_race_1driver_and_fuel_Extension2.stan", hamilton_data_Ext)
+
+arima_results <- arima_cv(hamilton_laps, hamilton_pit)
+
+```
+
+
+```{r}
+
+stan_results_base[[1]]
+
+stan_results_Ext1[[1]]
+
+stan_results_Ext2[[1]]
+
+arima_results[[1]]
+
+results_tbl <- tibble(Arima = arima_results[[1]],
+                      Base_Model = stan_results_base[[1]],
+                      Extension_1 = stan_results_Ext1[[1]],
+                      Extension_2 = stan_results_Ext2[[1]])
+
+write.csv(results_tbl, file = "Model_Selection_Results.csv")
+
+```
+
+```{r}
+
+# Do CRPS calculations
+library(scoringRules)
+
+
+##### Base Model ##########################################
+crps_base <- rep(NA,3)
+for(i in 1:3) {
+  crps_temp <- rep(NA,length(stan_results_base[[3]][[i]]))
+  for(j in 1:length(stan_results_base[[3]][[i]])) {
+    crps_temp[j] <- crps_sample(y = hamilton_laps[ncol(stan_results_base[[3]][[i]][[j]]$z)+1], dat = as.vector(stan_results_base[[3]][[i]][[j]]$y_pred))
+  }
+  crps_base[i] <- mean(crps_temp)
+}
+
+##### Extension 1 ##########################################
+crps_ext1 <- rep(NA,3)
+for(i in 1:3) {
+  crps_temp <- rep(NA,length(stan_results_Ext1[[3]][[i]]))
+  for(j in 1:length(stan_results_Ext1[[3]][[i]])) {
+    crps_temp[j] <- crps_sample(y = hamilton_laps[ncol(stan_results_Ext1[[3]][[i]][[j]]$z)+1], dat = as.vector(stan_results_Ext1[[3]][[i]][[j]]$y_pred))
+  }
+  crps_ext1[i] <- mean(crps_temp)
+}
+
+##### Extension 2 ##########################################
+crps_ext2 <- rep(NA,3)
+for(i in 1:3) {
+  crps_temp <- rep(NA,length(stan_results_Ext2[[3]][[i]]))
+  for(j in 1:length(stan_results_Ext2[[3]][[i]])) {
+    crps_temp[j] <- crps_sample(y = hamilton_laps[ncol(stan_results_Ext2[[3]][[i]][[j]]$z)+1], dat = as.vector(stan_results_Ext2[[3]][[i]][[j]]$y_pred))
+  }
+  crps_ext2[i] <- mean(crps_temp)
+}
+
+crps_tbl <- tibble(Base = crps_base,
+                   Extension1 = crps_ext1,
+                   Extnesion2 = crps_ext2)
+
+write.csv(crps_tbl, file = "CRPS_Results.csv")
+
+#crps_sample(y = hamilton_laps[ncol(stan_results_base[[3]][[1]][[1]]$z)], dat = as.vector(stan_results_base[[3]][[1]][[1]]$y_pred))
+
+```
+
+
+```{r}
+library(patchwork)
+# Want to make a nice table of graphs here with the predictions and CIs 
+stan_results_base[[2]][[1]] <- stan_results_base[[2]][[1]] + labs(title = "Stint 1 Predictions", y ="Lap Time in Seconds (Base Model)")
+stan_results_base[[2]][[2]] <- stan_results_base[[2]][[2]] + labs(title = "Stint 2 Predictions", y ="Lap Time in Seconds (Base Model)")
+stan_results_base[[2]][[3]] <- stan_results_base[[2]][[3]] + labs(title = "Stint 3 Predictions", y ="Lap Time in Seconds (Base Model)")
+stan_results_Ext1[[2]][[1]] <- stan_results_Ext1[[2]][[1]] + labs(title = "Stint 1 Predictions", y ="Lap Time in Seconds (First Extension)")
+stan_results_Ext1[[2]][[2]] <- stan_results_Ext1[[2]][[2]] + labs(title = "Stint 2 Predictions", y ="Lap Time in Seconds (First Extension)")
+stan_results_Ext1[[2]][[3]] <- stan_results_Ext1[[2]][[3]] + labs(title = "Stint 3 Predictions", y ="Lap Time in Seconds (First Extension)")
+stan_results_Ext2[[2]][[1]] <- stan_results_Ext2[[2]][[1]] + labs(title = "Stint 1 Predictions", y ="Lap Time in Seconds (Second Extension)")
+stan_results_Ext2[[2]][[2]] <- stan_results_Ext2[[2]][[2]] + labs(title = "Stint 2 Predictions", y ="Lap Time in Seconds (Second Extension)")
+stan_results_Ext2[[2]][[3]] <- stan_results_Ext2[[2]][[3]] + labs(title = "Stint 3 Predictions", y ="Lap Time in Seconds (Second Extension)")
+
+(stan_results_base[[2]][[1]] + stan_results_base[[2]][[2]] + stan_results_base[[2]][[3]]) + plot_layout(guides = "collect") & theme(legend.position = "bottom")
+
+#png("predictions_base.png", width = 800, height = 600)
+(stan_results_base[[2]][[1]] + stan_results_base[[2]][[2]] + stan_results_base[[2]][[3]]) +
+  plot_layout(guides = "collect", axis_titles = "collect") &
+  theme(legend.position = "bottom")
+
+row1 <- stan_results_base[[2]][[1]] + 
+        stan_results_base[[2]][[2]] + 
+        stan_results_base[[2]][[3]]
+
+# Second row
+row2 <- stan_results_Ext1[[2]][[1]] + 
+        stan_results_Ext1[[2]][[2]] + 
+        stan_results_Ext1[[2]][[3]]
+
+# Third row
+row3 <- stan_results_Ext2[[2]][[1]] + 
+        stan_results_Ext2[[2]][[2]] + 
+        stan_results_Ext2[[2]][[3]]
+
+png("predictions_ext1.png")
+row2 +
+  plot_layout(guides = "collect", axis_titles = "collect") &
+  theme(legend.position = "bottom")
+dev.off()
+
+png("predictions_ext2.png")
+row3 +
+  plot_layout(guides = "collect", axis_titles = "collect") &
+  theme(legend.position = "bottom")
+dev.off()
+
+(stan_results_base[[2]][[1]] + stan_results_base[[2]][[2]] + stan_results_base[[2]][[3]])/
+(stan_results_Ext1[[2]][[1]] + stan_results_Ext1[[2]][[2]] + stan_results_Ext1[[2]][[3]])/
+(stan_results_Ext2[[2]][[1]] + stan_results_Ext2[[2]][[2]] + stan_results_Ext2[[2]][[3]]) +
+plot_layout(guides = "collect", axis_titles = "collect") &
+  theme(legend.position = "bottom")
+
+title_row1 <- ggplot() + 
+  annotate("text", x = 0.5, y = 0.5, label = "Row 1: Base Model", size = 5) + 
+  theme_void()
+
+row1 <- row1 +
+  plot_layout(guides = "auto", axis_titles = "collect") &
+  theme(legend.position = "bottom")
+
+row2 <- row2 +
+  plot_layout(guides = "auto", axis_titles = "collect") &
+  theme(legend.position = "bottom")
+
+row3 <- row3 +
+  plot_layout(guides = "auto", axis_titles = "collect") &
+  theme(legend.position = "bottom")
+
+row4 <- row4 +
+  plot_layout(guides = "auto", axis_titles = "collect") &
+  theme(legend.position = "bottom")
+
+png("predictions_new.png", width = 1400, height = 1800)
+(row1/
+row2/
+row3/
+row4)+
+  plot_layout(guides = "collect", axis_titles = "collect") &
+  theme(legend.position = "bottom", 
+        axis.title.y = element_text(size = 20))
+dev.off()
+
+
+```
+
+## Skewed T distribution 
+
+```{r}
+
+stan_results_base_t <- stint_CV("full_race_1driver_and_fuel_base_t.stan", hamilton_data_base)
+
+```
+
+
+```{r}
+
+library(sgt)
+
+stan_results_base_t[[2]][[1]]
+
+stan_results_base_t[[2]][[2]]
+
+stan_results_base_t[[1]]
+
+#stan_results_base_t[[3]][[1]][[1]]
+
+RMSPE <- rep(NA,3)
+
+plots <- vector("list", 3)
+
+for(i in 1:3){
+  
+  temp <- rep(NA, length(stan_results_base_t[[3]][[i]]))
+  ypred_hat <- rep(NA, length(stan_results_base_t[[3]][[i]]))
+  
+  pred_laps <- rep(NA, length(stan_results_base_t[[3]][[i]]))
+  ypred_l <- rep(NA, length(stan_results_base_t[[3]][[i]]))
+  ypred_u <- rep(NA, length(stan_results_base_t[[3]][[i]]))
+  
+  for(j in 1:length(stan_results_base_t[[3]][[i]])){
+    stan_results_base_t[[3]][[i]][[j]]$y_pred <- rsgt(n = length(stan_results_base_t[[3]][[i]][[j]]$z_pred), stan_results_base_t[[3]][[i]][[j]]$z_pred + stan_results_base_t[[3]][[i]][[j]]$gamma * fuel.kg[ncol(stan_results_base_t[[3]][[i]][[j]]$z)+1], stan_results_base_t[[3]][[i]][[j]]$sdo, stan_results_base_t[[3]][[i]][[j]]$skew,2,2)
+    
+    
+    ypred_hat[j] <- mean(stan_results_base_t[[3]][[i]][[j]]$y_pred)
+    ypred_l[j] <- quantile(stan_results_base_t[[3]][[i]][[j]]$y_pred, probs = .025)
+    ypred_u [j] <- quantile(stan_results_base_t[[3]][[i]][[j]]$y_pred, probs = .975)
+    
+    temp[j] <- (hamilton_laps[ncol(stan_results_base_t[[3]][[i]][[j]]$z)+1] - mean(stan_results_base_t[[3]][[i]][[j]]$y_pred))^2
+    
+    pred_laps[j] <- ncol(stan_results_base_t[[3]][[i]][[j]]$z)+1
+  }
+  RMSPE[i] <- sqrt(mean(temp))
+  
+  pred_df1 <- tibble(time = pred_laps,
+                    predictions = ypred_hat,
+                    pred_l = ypred_l,
+                    pred_u = ypred_u)
+  
+  df1 <- tibble(laps = 1:pred_laps[length(pred_laps)],
+               y = hamilton_laps[1:pred_laps[length(pred_laps)]])
+  
+  plots [[i]] <- ggplot() +
+    geom_point(data = df1, aes(x = laps, y = y, color = "Observations")) +
+    geom_point(data = pred_df1, aes(x = time, y = predictions, color = "Predictions")) +
+    geom_line(data = pred_df1, aes(x = time, y = predictions, color = "Predictions")) +
+    geom_ribbon(data = pred_df1, aes(x = time, ymin = pred_l, ymax = pred_u), fill = "black",color = "gray", alpha = .1) +
+    scale_color_manual(values = c("Observations" = "red", "Predictions" = "blue")) +
+    labs(title = paste("Stint", i, "Predictions"),
+         x = "Lap",
+         y = "Lap Time in Seconds",
+         color = "Legend") +
+    theme(    
+          axis.title.x = element_text(size = 14),  # X-axis label size
+          axis.title.y = element_text(size = 14),
+          legend.text = element_text(size = 12),
+          legend.title = element_text(size = 14)
+          ) 
+  
+  
+}
+
+RMSPE
+
+row4 <- plots[[1]] + plots[[2]] + plots[[3]]
+
+```
+
+```{r}
+
+temp_tbl <- read_csv("Model_Selection_Results.csv")
+temp_tbl$Extension_3 <- RMSPE
+
+write.csv(temp_tbl, file = "Model_Selection_Results.csv",row.names = FALSE)
+```
+
+```{r}
+
+row4 <- plots[[1]] + plots[[2]] + plots[[3]]
+
+png("predictions_skewt_line.png",width = 800, height = 600)
+row4 +
+  plot_layout(guides = "collect", axis_titles = "collect") &
+  theme(legend.position = "bottom")
+dev.off()
+
+```
+
+```{r}
+
+
+library(scoringRules)
+library(scoringutils)
+
+
+##### Skew T Model ##########################################
+crps_skewt <- rep(NA,3)
+for(i in 1:3) {
+  crps_temp <- rep(NA,length(stan_results_base_t[[3]][[i]]))
+  for(j in 1:length(stan_results_base_t[[3]][[i]])) {
+    crps_temp[j] <- scoringRules::crps_sample(y = hamilton_laps[ncol(stan_results_base_t[[3]][[i]][[j]]$z)+1], dat = as.vector(stan_results_base_t[[3]][[i]][[j]]$y_pred))
+  }
+  crps_skewt[i] <- mean(crps_temp)
+}
+
+crps_skewt
+
+
+```
+
+```{r}
+
+temptbl <- read_csv("CRPS_Results.csv")
+temptbl <- cbind(temptbl, arima_results[[3]])
+#write.csv(temptbl, "CRPS_Results.csv", row.names = FALSE)
+
+```
+

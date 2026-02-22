@@ -1,0 +1,78 @@
+---
+title: "Full_Race_CV"
+author: "Cole Cappello"
+format: html
+---
+
+```{r, include=FALSE}
+
+# Setup
+library(tidyverse)
+library(Matrix)
+library(rstan)
+library(sgt)
+library(scoringRules)
+library(scoringutils)
+
+source("CV_Functions.R")
+
+options(mc.cores = parallel::detectCores())
+
+allLaps <- read_csv("Hamilton_2025_All_Races.csv") %>% 
+  mutate(Stint = as.factor(Stint),
+         Compound = as.factor(Compound),
+         LapTime = LapTimeSeconds) %>%
+  filter(!str_detect(TrackStatus, "4|5|6|7"))
+
+```
+
+
+# Get CV Results
+
+The following code chunks generate the tables used for model selection on the Austrian Grand Prix.
+
+```{r}
+
+hamilton_data_base <- load_race_data("Austrian Grand Prix")
+
+hamilton_data_base$z_reset0 <- 69.0
+
+hamilton_data_Ext <- hamilton_data_base
+hamilton_data_Ext$z_reset0 <- c(69.5,69.0,68.5)
+
+stan_results_base <- stint_CV("full_race_1driver_and_fuel_base.stan", hamilton_data_base)
+
+stan_results_Ext1 <-stint_CV("full_race_1driver_and_fuel_Extension1.stan", hamilton_data_Ext)
+
+stan_results_Ext2 <- stint_CV("full_race_1driver_and_fuel_Extension2.stan", hamilton_data_Ext)
+
+stan_results_t <- skewt_CV("full_race_1driver_and_fuel_base_t.stan", hamilton_data_base)
+
+arima_results <- arima_cv(hamilton_data_base$y, hamilton_data_base$Pit)
+
+results_tbl_RMSPE <- tibble(Arima = arima_results[[1]],
+                            Base_Model = stan_results_base[[1]],
+                            Extension_1 = stan_results_Ext1[[1]],
+                            Extension_2 = stan_results_Ext2[[1]],
+                            Skew_t = stan_results_t[[1]])
+
+results_tbl_CRPS <- tibble(Arima = arima_results[[2]],
+                            Base_Model = skewt_CRPS(stan_results_base[[3]], hamilton_data_base$y),
+                            Extension_1 = skewt_CRPS(stan_results_Ext1[[3]], hamilton_data_base$y),
+                            Extension_2 = skewt_CRPS(stan_results_Ext2[[3]],  hamilton_data_base$y),
+                            Skew_t = stan_results_t[[2]])
+
+
+
+```
+
+
+You can write the results to a csv if you like.
+
+```{r}
+
+write_csv(results_tbl_RMSPE,"Model_Selection_Results.csv")
+write_csv(results_tbl_CRPS, "CRPS_results.csv")
+
+```
+
