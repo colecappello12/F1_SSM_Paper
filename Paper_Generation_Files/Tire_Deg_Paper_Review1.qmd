@@ -197,6 +197,12 @@ ggplot(resid_df, aes(x = Residual)) +
 
 ```
 
+## Code Availability
+
+For the interested reader, a Github repository with scripts for pulling data, performing cross validation, and generating the paper itself is available at: 
+
+<https://github.com/colecappello12/F1_SSM_Paper>
+
 # Bayesian State-Space Model
 
 In this section we'll first briefly review state space models, then describe in detail the process used to model latent degradation rates through the observable lap time process.  All models were fitted using the software package Stan (Stan Development Team, 2020).
